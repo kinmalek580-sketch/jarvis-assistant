@@ -1,4 +1,3 @@
-
 const http = require("http");
 const https = require("https");
 require("dotenv").config();
@@ -20,13 +19,16 @@ function sendJson(res, status, data) {
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+
     req.on("data", chunk => {
       body += chunk;
+
       if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) {
         reject(new Error("Request too large"));
         req.destroy();
       }
     });
+
     req.on("end", () => {
       try {
         resolve(JSON.parse(body || "{}"));
@@ -34,6 +36,7 @@ function readJson(req) {
         reject(new Error("Invalid JSON"));
       }
     });
+
     req.on("error", reject);
   });
 }
@@ -45,51 +48,83 @@ function callOpenAI(message) {
       input: [
         {
           role: "system",
-          content: "You are JARVIS, a helpful, clear, friendly personal AI assistant. Be honest about uncertainty and never claim to have performed a device action unless it actually happened."
+          content:
+            "You are JARVIS, a helpful, clear, friendly personal AI assistant. Be honest about uncertainty and never claim to have performed a device action unless it actually happened."
         },
-        { role: "user", content: message }
+        {
+          role: "user",
+          content: message
+        }
       ],
       max_output_tokens: 500
     });
 
-    const request = https.request({
-      hostname: "api.openai.com",
-      path: "/v1/responses",
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${API_KEY}`,
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(payload)
+    const request = https.request(
+      {
+        hostname: "api.openai.com",
+        path: "/v1/responses",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${API_KEY}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload)
+        }
+      },
+      response => {
+        let data = "";
+
+        response.on("data", chunk => {
+          data += chunk;
+        });
+
+        response.on("end", () => {
+          let parsed;
+
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            console.error(
+              "OpenAI returned an unreadable response. HTTP status:",
+              response.statusCode
+            );
+
+            return reject(
+              new Error("AI service returned an unreadable response")
+            );
+          }
+
+          if (
+            response.statusCode < 200 ||
+            response.statusCode >= 300
+          ) {
+            const error = parsed.error || {};
+
+            // Log diagnostic details, never the API key.
+            console.error("OpenAI HTTP status:", response.statusCode);
+            console.error("OpenAI error type:", error.type || "unknown");
+            console.error("OpenAI error code:", error.code || "unknown");
+            console.error("OpenAI error message:", error.message || "No details");
+            console.error("OpenAI error parameter:", error.param || "none");
+
+            return reject(new Error("AI service request failed"));
+          }
+
+          const reply = (parsed.output || [])
+            .flatMap(item => item.content || [])
+            .filter(item => item.type === "output_text")
+            .map(item => item.text || "")
+            .join("\n")
+            .trim();
+
+          resolve(reply || "I couldn't produce a response this time.");
+        });
       }
-    }, response => {
-      let data = "";
-      response.on("data", chunk => data += chunk);
-      response.on("end", () => {
-        let parsed;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          return reject(new Error("AI service returned an unreadable response"));
-        }
+    );
 
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          return reject(new Error("AI service request failed"));
-        }
-
-        const reply = (parsed.output || [])
-          .flatMap(item => item.content || [])
-          .filter(item => item.type === "output_text")
-          .map(item => item.text || "")
-          .join("\n")
-          .trim();
-
-        resolve(reply || "I couldn't produce a response this time.");
-      });
+    request.setTimeout(30000, () => {
+      request.destroy(new Error("AI request timed out"));
     });
 
-    request.setTimeout(30000, () =>
-      request.destroy(new Error("AI request timed out"))
-    );
     request.on("error", reject);
     request.write(payload);
     request.end();
@@ -121,15 +156,22 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const body = await readJson(req);
+
       const message =
-        typeof body.message === "string" ? body.message.trim() : "";
+        typeof body.message === "string"
+          ? body.message.trim()
+          : "";
 
       if (!message) {
-        return sendJson(res, 400, { error: "Please provide a message." });
+        return sendJson(res, 400, {
+          error: "Please provide a message."
+        });
       }
 
       if (message.length > 4000) {
-        return sendJson(res, 413, { error: "Message is too long." });
+        return sendJson(res, 413, {
+          error: "Message is too long."
+        });
       }
 
       if (!API_KEY) {
@@ -139,16 +181,20 @@ const server = http.createServer(async (req, res) => {
       }
 
       const reply = await callOpenAI(message);
+
       return sendJson(res, 200, { reply });
     } catch (error) {
       console.error("Request failed:", error.message);
+
       return sendJson(res, 500, {
-        error: "The request failed. Check server settings."
+        error: "The request failed. Check server logs."
       });
     }
   }
 
-  return sendJson(res, 404, { error: "Not found." });
+  return sendJson(res, 404, {
+    error: "Not found."
+  });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
