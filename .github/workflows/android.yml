@@ -1,4 +1,3 @@
-
 name: Build JARVIS APK
 
 on:
@@ -18,6 +17,7 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      JARVIS_ACCESS_TOKEN: ${{ secrets.JARVIS_ACCESS_TOKEN }}
 
     steps:
       - name: Download repository
@@ -45,13 +45,73 @@ jobs:
       - name: Install Android SDK components
         run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Check project ZIP
-        run: test -f JARVIS_Android_Starter_CloudBuild.zip
-
       - name: Extract project
         run: |
           unzip -q JARVIS_Android_Starter_CloudBuild.zip -d extracted
           test -d extracted/JARVIS_Android_Starter/android-app
+
+      - name: Configure JARVIS for real AI
+        working-directory: extracted/JARVIS_Android_Starter/android-app
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          root = Path(".")
+          gradle = root / "app/build.gradle.kts"
+          source = root / "app/src/main/java/com/example/jarvisassistant/MainActivity.kt"
+          manifest = root / "app/src/main/AndroidManifest.xml"
+
+          assert gradle.exists(), f"Missing {gradle}"
+          assert source.exists(), f"Missing {source}"
+          assert manifest.exists(), f"Missing {manifest}"
+
+          token = os.environ.get("JARVIS_ACCESS_TOKEN", "")
+          if not token:
+              raise SystemExit("Missing GitHub Actions secret JARVIS_ACCESS_TOKEN")
+
+          g = gradle.read_text()
+          g = g.replace(
+              'buildConfigField("String", "BACKEND_BASE_URL", "\\"http://10.0.2.2:3000/\\"")',
+              'buildConfigField("String", "BACKEND_BASE_URL", "\\"https://jarvis-assistant-sp8y.onrender.com/\\"")'
+          )
+          g = g.replace(
+              'buildConfigField("Boolean", "DEMO_MODE", "true")',
+              'buildConfigField("Boolean", "DEMO_MODE", "false")'
+          )
+
+          token_line = '        buildConfigField("String", "JARVIS_ACCESS_TOKEN", "\\"${System.getenv("JARVIS_ACCESS_TOKEN") ?: ""}\\"")'
+          if "JARVIS_ACCESS_TOKEN" not in g:
+              anchor = '        buildConfigField("Boolean", "DEMO_MODE", "false")'
+              assert anchor in g, "Could not find DEMO_MODE setting in Gradle file"
+              g = g.replace(anchor, anchor + "\n" + token_line, 1)
+
+          if "10.0.2.2:3000" in g or 'DEMO_MODE", "true"' in g:
+              raise SystemExit("Could not update backend URL or demo mode")
+          gradle.write_text(g)
+
+          s = source.read_text()
+          anchor = 'setRequestProperty("Content-Type", "application/json; charset=utf-8")'
+          auth = 'setRequestProperty("Authorization", "Bearer ${BuildConfig.JARVIS_ACCESS_TOKEN}")'
+          if auth not in s:
+              assert anchor in s, "Could not find chat request headers"
+              s = s.replace(anchor, anchor + "\n            " + auth, 1)
+          source.write_text(s)
+
+          m = manifest.read_text()
+          if "android.permission.INTERNET" not in m:
+              m, count = re.subn(
+                  r"(<manifest\\b[^>]*>)",
+                  r'\\1\n    <uses-permission android:name="android.permission.INTERNET" />',
+                  m,
+                  count=1
+              )
+              assert count == 1, "Could not add Internet permission"
+              manifest.write_text(m)
+
+          print("JARVIS backend configuration updated.")
+          PY
 
       - name: Build APK
         working-directory: extracted/JARVIS_Android_Starter/android-app
@@ -63,4 +123,3 @@ jobs:
           name: JARVIS-Android-APK
           path: extracted/JARVIS_Android_Starter/android-app/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          
