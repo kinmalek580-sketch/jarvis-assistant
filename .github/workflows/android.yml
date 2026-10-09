@@ -23,10 +23,14 @@ jobs:
       - uses: android-actions/setup-android@v3
 
       
-      - name: Install Android SDK components
-        run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+      
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
           
 
       - name: Extract project ZIP
