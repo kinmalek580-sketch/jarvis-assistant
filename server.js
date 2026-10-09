@@ -1,9 +1,11 @@
+
 const http = require("http");
 const https = require("https");
 require("dotenv").config();
 
 const PORT = Number(process.env.PORT || 3000);
 const API_KEY = process.env.OPENAI_API_KEY;
+const ACCESS_TOKEN = process.env.JARVIS_ACCESS_TOKEN;
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -26,8 +28,11 @@ function readJson(req) {
       }
     });
     req.on("end", () => {
-      try { resolve(JSON.parse(body || "{}")); }
-      catch { reject(new Error("Invalid JSON")); }
+      try {
+        resolve(JSON.parse(body || "{}"));
+      } catch {
+        reject(new Error("Invalid JSON"));
+      }
     });
     req.on("error", reject);
   });
@@ -47,26 +52,28 @@ function callOpenAI(message) {
       max_output_tokens: 500
     });
 
-    const req = https.request({
+    const request = https.request({
       hostname: "api.openai.com",
       path: "/v1/responses",
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${API_KEY}`,
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(payload)
       }
-    }, res => {
+    }, response => {
       let data = "";
-      res.on("data", chunk => data += chunk);
-      res.on("end", () => {
+      response.on("data", chunk => data += chunk);
+      response.on("end", () => {
         let parsed;
-        try { parsed = JSON.parse(data); }
-        catch { return reject(new Error("AI service returned an unreadable response")); }
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return reject(new Error("AI service returned an unreadable response"));
+        }
 
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          const message = parsed.error?.message || `AI service error (${res.statusCode})`;
-          return reject(new Error(message));
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          return reject(new Error("AI service request failed"));
         }
 
         const reply = (parsed.output || [])
@@ -79,46 +86,71 @@ function callOpenAI(message) {
         resolve(reply || "I couldn't produce a response this time.");
       });
     });
-    req.setTimeout(30000, () => req.destroy(new Error("AI request timed out")));
-    req.on("error", reject);
-    req.write(payload);
-    req.end();
+
+    request.setTimeout(30000, () =>
+      request.destroy(new Error("AI request timed out"))
+    );
+    request.on("error", reject);
+    request.write(payload);
+    request.end();
   });
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const url = new URL(req.url, "http://localhost");
 
   if (req.method === "GET" && url.pathname === "/health") {
-    return sendJson(res, 200, { ok: true, mode: API_KEY ? "ai" : "demo" });
+    return sendJson(res, 200, {
+      ok: true,
+      mode: API_KEY ? "ai" : "demo"
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/chat") {
+    if (!ACCESS_TOKEN) {
+      return sendJson(res, 503, {
+        error: "Backend access is not configured."
+      });
+    }
+
+    if (req.headers.authorization !== `Bearer ${ACCESS_TOKEN}`) {
+      return sendJson(res, 401, {
+        error: "Unauthorized."
+      });
+    }
+
     try {
       const body = await readJson(req);
-      const message = typeof body.message === "string" ? body.message.trim() : "";
-      if (!message) return sendJson(res, 400, { error: "Please provide a message." });
-      if (message.length > 4000) return sendJson(res, 413, { error: "Message is too long (maximum 4000 characters)." });
+      const message =
+        typeof body.message === "string" ? body.message.trim() : "";
 
-      if (!API_KEY || API_KEY === "replace_with_your_own_key") {
-        return sendJson(res, 200, {
-          reply: `Demo backend received: "${message}". Add your API key to backend/.env to enable real AI.`
+      if (!message) {
+        return sendJson(res, 400, { error: "Please provide a message." });
+      }
+
+      if (message.length > 4000) {
+        return sendJson(res, 413, { error: "Message is too long." });
+      }
+
+      if (!API_KEY) {
+        return sendJson(res, 503, {
+          error: "AI service is not configured."
         });
       }
 
       const reply = await callOpenAI(message);
       return sendJson(res, 200, { reply });
-    } catch (err) {
-      console.error("Request failed:", err.message);
-      return sendJson(res, 500, { error: "The request failed. Check server settings and logs." });
+    } catch (error) {
+      console.error("Request failed:", error.message);
+      return sendJson(res, 500, {
+        error: "The request failed. Check server settings."
+      });
     }
   }
 
-  sendJson(res, 404, { error: "Not found" });
+  return sendJson(res, 404, { error: "Not found." });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`JARVIS backend listening on port ${PORT}`);
-  console.log(`Mode: ${API_KEY ? "AI (API usage may cost money)" : "demo (no API key)"}`);
-  console.log("Development prototype only. Do not expose this server directly to the public internet.");
+  console.log("JARVIS backend started.");
 });
